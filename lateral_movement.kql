@@ -1,0 +1,84 @@
+// ============================================================
+// RULE: Lateral Movement — Pass-the-Hash / Token Abuse
+// MITRE ATT&CK: T1550 - Use Alternate Authentication Material
+//               T1550.002 - Pass the Hash
+//               T1550.004 - Web Session Cookie
+// Severity: Critical
+// Description: Detects patterns consistent with credential material
+//              reuse across hosts — NTLM anomalies, token reuse from
+//              new IPs, and rapid multi-host authentication chains.
+// ============================================================
+
+// -- Part 1: NTLM Auth to Multiple Hosts in Short Window ------
+let NTLMHopping =
+SecurityEvent
+| where TimeGenerated >= ago(1d)
+| where EventID == 4624                            // Successful logon
+| where LogonType == 3                             // Network logon
+| where AuthenticationPackageName == "NTLM"
+| extend
+    Account      = tostring(TargetUserName),
+    SourceIP     = tostring(IpAddress),
+    DestHost     = tostring(Computer)
+| where Account !endswith "$"                      // Exclude machine accounts
+| summarize
+    HostsAccessed = dcount(DestHost),
+    HostList      = make_set(DestHost),
+    SourceIPs     = make_set(SourceIP)
+    by Account, bin(TimeGenerated, 15m)
+| where HostsAccessed >= 4                         // 4+ hosts in 15 min = suspicious
+| extend AlertType = "NTLM Multi-Host Hop";
+
+// -- Part 2: OAuth Token Reuse from New IP -------------------
+let TokenAbuse =
+SigninLogs
+| where TimeGenerated >= ago(1d)
+| where ResultType == "0"
+| where TokenIssuerType == "AzureAD"
+| extend
+    UPN       = tostring(UserPrincipalName),
+    IP        = tostring(IPAddress),
+    TokenId   = tostring(UniqueTokenIdentifier)
+| summarize
+    IPsPerToken = dcount(IP),
+    IPList      = make_set(IP)
+    by UPN, TokenId
+| where IPsPerToken > 1                            // Same token from 2+ IPs
+| extend AlertType = "OAuth Token Reuse";
+
+// -- Part 3: Rapid Sequential Host Authentication ------------
+let RapidHostAuth =
+SecurityEvent
+| where TimeGenerated >= ago(1d)
+| where EventID == 4624
+| where LogonType in (3, 10)                       // Network or RemoteInteractive
+| extend
+    Account   = tostring(TargetUserName),
+    DestHost  = tostring(Computer),
+    SourceIP  = tostring(IpAddress)
+| where Account !endswith "$"
+| order by Account, TimeGenerated asc
+| serialize
+| extend PrevHost = prev(DestHost, 1),
+         PrevTime = prev(TimeGenerated, 1),
+         PrevUser = prev(Account, 1)
+| where Account == PrevUser
+| where DestHost != PrevHost
+| extend MinsBetweenHops = datetime_diff("second", TimeGenerated, PrevTime) / 60.0
+| where MinsBetweenHops <= 5                       // Lateral hop within 5 minutes
+| extend AlertType = "Rapid Sequential Host Auth";
+
+// -- Union all three signals ----------------------------------
+union
+    (NTLMHopping  | project TimeGenerated, AlertType, Account, Details = tostring(HostList)),
+    (TokenAbuse   | project TimeGenerated = now(), AlertType, Account = UPN, Details = tostring(IPList)),
+    (RapidHostAuth| project TimeGenerated, AlertType, Account, Details = strcat(PrevHost, " -> ", DestHost))
+| order by TimeGenerated desc
+
+// ============================================================
+// TUNING NOTES:
+// - Part 1: Raise HostsAccessed threshold in noisy environments
+// - Part 2: Requires AAD SigninLogs with UniqueTokenIdentifier
+// - Part 3: Tune MinsBetweenHops based on baseline admin behavior
+// - Correlate all three signals on the same Account for high-fidelity alerts
+// ============================================================
