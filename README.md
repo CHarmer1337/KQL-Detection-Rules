@@ -1,4 +1,4 @@
-# KQL Detection Rules — Microsoft Sentinel
+# KQL Detection Rules
 
 Custom KQL detection queries for identifying high-priority threat patterns in enterprise environments. Designed for Microsoft Sentinel (Log Analytics) and adaptable to Defender XDR.
 
