@@ -1,0 +1,47 @@
+// ============================================================
+// RULE: MFA Bypass Attempt Detection
+// MITRE ATT&CK: T1556.006 - Modify Authentication Process: MFA
+// Severity: High
+// Description: Detects successful logins where MFA was not satisfied,
+//              bypassed via legacy auth, or where MFA claims are absent.
+// ============================================================
+
+SigninLogs
+| where TimeGenerated >= ago(1d)
+| where ResultType == "0"                          // Successful sign-in
+| where AuthenticationRequirement == "singleFactorAuthentication"
+    or MfaDetail.authMethod == ""
+    or ClientAppUsed in (
+        "Exchange ActiveSync",
+        "IMAP4",
+        "MAPI Over HTTP",
+        "POP3",
+        "SMTP Auth",
+        "Other clients"
+    )                                              // Legacy protocols that bypass MFA
+| extend
+    UserPrincipalName   = tostring(UserPrincipalName),
+    IPAddress           = tostring(IPAddress),
+    ClientApp           = tostring(ClientAppUsed),
+    AuthMethod          = tostring(MfaDetail.authMethod),
+    ConditionalAccess   = tostring(ConditionalAccessStatus),
+    Location            = strcat(LocationDetails.city, ", ", LocationDetails.countryOrRegion)
+| project
+    TimeGenerated,
+    UserPrincipalName,
+    IPAddress,
+    ClientApp,
+    AuthMethod,
+    ConditionalAccess,
+    Location,
+    AppDisplayName,
+    UserAgent
+| order by TimeGenerated desc
+
+// ============================================================
+// TUNING NOTES:
+// - Whitelist service accounts using:
+//     | where UserPrincipalName !in~ ("svc-account@domain.com")
+// - Scope to specific apps by filtering AppDisplayName
+// - Increase lookback window (ago(7d)) for weekly hunting
+// ============================================================
