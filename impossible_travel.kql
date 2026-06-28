@@ -1,0 +1,63 @@
+// ============================================================
+// RULE: Impossible Travel Detection
+// MITRE ATT&CK: T1078 - Valid Accounts
+// Severity: High
+// Description: Flags accounts that authenticate from two geographically
+//              distant locations within a timeframe impossible to travel.
+//              Threshold: >500 km within 1 hour.
+// ============================================================
+
+let TravelThresholdKm   = 500;
+let TravelWindowMinutes = 60;
+
+let Signins = SigninLogs
+| where TimeGenerated >= ago(1d)
+| where ResultType == "0"
+| where isnotempty(LocationDetails.countryOrRegion)
+| extend
+    Lat       = toreal(LocationDetails.geoCoordinates.latitude),
+    Lon       = toreal(LocationDetails.geoCoordinates.longitude),
+    Country   = tostring(LocationDetails.countryOrRegion),
+    City      = tostring(LocationDetails.city),
+    UPN       = tostring(UserPrincipalName),
+    IP        = tostring(IPAddress)
+| where isnotempty(Lat) and isnotempty(Lon)
+| project TimeGenerated, UPN, IP, Lat, Lon, Country, City, AppDisplayName;
+
+Signins
+| join kind=inner (Signins) on UPN
+| where UPN == UPN1
+| where abs(datetime_diff("minute", TimeGenerated, TimeGenerated1)) <= TravelWindowMinutes
+| where TimeGenerated != TimeGenerated1
+| where IP != IP1
+// Haversine approximation for distance (km)
+| extend
+    DeltaLat  = (Lat1 - Lat) * (PI() / 180),
+    DeltaLon  = (Lon1 - Lon) * (PI() / 180),
+    AvgLat    = ((Lat + Lat1) / 2) * (PI() / 180)
+| extend
+    A = sin(DeltaLat / 2) * sin(DeltaLat / 2)
+      + cos(Lat * (PI() / 180)) * cos(Lat1 * (PI() / 180))
+      * sin(DeltaLon / 2) * sin(DeltaLon / 2)
+| extend DistanceKm = 2 * 6371 * asin(sqrt(A))
+| where DistanceKm > TravelThresholdKm
+| project
+    FirstSignin      = TimeGenerated,
+    SecondSignin     = TimeGenerated1,
+    UPN,
+    FirstIP          = IP,
+    FirstLocation    = strcat(City, ", ", Country),
+    SecondIP         = IP1,
+    SecondLocation   = strcat(City1, ", ", Country1),
+    DistanceKm       = round(DistanceKm, 1),
+    App              = AppDisplayName
+| order by DistanceKm desc
+
+// ============================================================
+// TUNING NOTES:
+// - Adjust TravelThresholdKm for sensitivity (lower = more alerts)
+// - Adjust TravelWindowMinutes based on your org's risk tolerance
+// - Add VPN egress IPs to a watchlist and exclude known VPN hops:
+//     | where IP !in (VPNEgressList)
+// - Known travelers (executives) can be excluded via UPN watchlist
+// ============================================================
